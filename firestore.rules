@@ -1,0 +1,353 @@
+rules_version = '2';
+
+// Security rules for the Everhue Firestore database.
+//
+// One invariant: user data is owner-scoped. Every document in `skills`,
+// `activities`, `logs`, `goals` and `goal_entries` carries an `owner_uid`, and
+// a caller may only touch the ones where that field equals their own auth uid. `owner_uid` is written
+// once, at create, and can never be moved afterwards.
+//
+// Reads are list queries. Firestore only allows a list when the query itself
+// guarantees the rule, which is why every hook in `src/features/*/hooks`
+// filters on `where('owner_uid', '==', uid)`. Dropping that clause makes the
+// query fail here rather than return someone else's rows.
+//
+// Nothing derived is stored: XP, levels and streaks are computed in the app
+// from `logs`, so there is no document a patched client could inflate.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---- helpers ---------------------------------------------------------
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // The document being written declares the caller as its owner.
+    function incomingIsOwn() {
+      return signedIn()
+        && request.resource.data.owner_uid is string
+        && request.resource.data.owner_uid == request.auth.uid;
+    }
+
+    // The document already stored belongs to the caller.
+    function storedIsOwn() {
+      return signedIn()
+        && resource.data.owner_uid == request.auth.uid;
+    }
+
+    // `owner_uid` is set at create and is immutable from then on.
+    function ownerUnchanged() {
+      return request.resource.data.owner_uid == resource.data.owner_uid;
+    }
+
+    // `created_at` is written with `serverTimestamp()`, which the rules see
+    // as `request.time`, so a client can neither backdate nor postdate a
+    // document. An edit sends no `created_at` and keeps the stored one.
+    function createdNow() {
+      return request.resource.data.created_at == request.time;
+    }
+
+    function createdAtUnchanged() {
+      return request.resource.data.created_at == resource.data.created_at;
+    }
+
+    function boundedString(value, min, max) {
+      return value is string && value.size() >= min && value.size() <= max;
+    }
+
+    // Rules have no loops, so a list is checked one index at a time, up to
+    // its maximum size. The checks are nested so that evaluation stops at
+    // the end of the list: index i is `n < i + 1 || valid(list[i]) && (...)`.
+    // That matters because a request may evaluate at most 1,000
+    // expressions. The longest checklist the app writes (20 steps) comes
+    // closest; `rules-tests` writes the longest list of each kind, so a
+    // change that makes them too expensive fails there.
+
+    // A document id, bounded like `skill_id` and `activity_id`.
+    function idValid(value) {
+      return boundedString(value, 1, 80);
+    }
+
+    function idsValid(ids) {
+      let n = ids.size();
+      return ids is list
+        && n <= 8
+        && (n < 1 || idValid(ids[0]) && (
+            n < 2 || idValid(ids[1]) && (
+            n < 3 || idValid(ids[2]) && (
+            n < 4 || idValid(ids[3]) && (
+            n < 5 || idValid(ids[4]) && (
+            n < 6 || idValid(ids[5]) && (
+            n < 7 || idValid(ids[6]) && (
+            n < 8 || idValid(ids[7])
+        ))))))));
+    }
+
+    // ---- skills ----------------------------------------------------------
+
+    function skillShapeValid() {
+      return request.resource.data.keys().hasAll(
+          ['owner_uid', 'name', 'realm', 'archived', 'created_at'])
+        && request.resource.data.keys().hasOnly(
+          ['owner_uid', 'name', 'realm', 'archived', 'created_at'])
+        && boundedString(request.resource.data.name, 1, 60)
+        && request.resource.data.realm in
+          ['library', 'forge', 'harbor', 'neon', 'gardens', 'bay']
+        && request.resource.data.archived is bool;
+    }
+
+    match /skills/{skillId} {
+      allow read: if storedIsOwn();
+      allow create: if incomingIsOwn() && skillShapeValid() && createdNow();
+      allow update: if storedIsOwn()
+        && incomingIsOwn()
+        && ownerUnchanged()
+        && createdAtUnchanged()
+        && skillShapeValid();
+      allow delete: if storedIsOwn();
+    }
+
+    // ---- activities ------------------------------------------------------
+
+    // Weekdays are 1 (Monday) to 7 (Sunday); `hasOnly` checks every element.
+    function scheduleValid(schedule) {
+      return schedule is map
+        && schedule.keys().hasAll(['type'])
+        && schedule.keys().hasOnly(['type', 'days', 'times'])
+        && schedule.type in ['daily', 'weekdays', 'weekly']
+        && (schedule.type != 'weekdays'
+          || (schedule.days is list
+            && schedule.days.size() >= 1
+            && schedule.days.size() <= 7
+            && schedule.days.hasOnly([1, 2, 3, 4, 5, 6, 7])))
+        && (schedule.type != 'weekly'
+          || (schedule.times is int
+            && schedule.times >= 1
+            && schedule.times <= 7));
+    }
+
+    // A part has exactly `id`, `name` and `target`: three keys, and reading
+    // a missing one fails the rule. `matches` bounds the length with one
+    // expression where `boundedString` takes four, and fails on anything
+    // that is not a string. The id is what a log stores in `part_id`, so
+    // the bounds match.
+    function partValid(part) {
+      return part.size() == 3
+        && part.id.matches('(?s).{1,40}')
+        && part.name.matches('(?s).{1,40}')
+        && part.target is number
+        && part.target > 0
+        && part.target <= 100000;
+    }
+
+    function partsValid(parts) {
+      let n = parts.size();
+      return parts is list
+        && n <= 8
+        && (n < 1 || partValid(parts[0]) && (
+            n < 2 || partValid(parts[1]) && (
+            n < 3 || partValid(parts[2]) && (
+            n < 4 || partValid(parts[3]) && (
+            n < 5 || partValid(parts[4]) && (
+            n < 6 || partValid(parts[5]) && (
+            n < 7 || partValid(parts[6]) && (
+            n < 8 || partValid(parts[7])
+        ))))))));
+    }
+
+    function activityShapeValid() {
+      return request.resource.data.keys().hasAll(
+          ['owner_uid', 'name', 'skill_id', 'kind', 'target', 'unit',
+           'minutes_per_unit', 'effort_minutes', 'parts', 'schedule',
+           'archived', 'created_at'])
+        && request.resource.data.keys().hasOnly(
+          ['owner_uid', 'name', 'skill_id', 'kind', 'target', 'unit',
+           'minutes_per_unit', 'effort_minutes', 'parts', 'schedule',
+           'archived', 'created_at'])
+        && boundedString(request.resource.data.name, 1, 80)
+        && boundedString(request.resource.data.skill_id, 1, 80)
+        && request.resource.data.kind in ['time', 'count', 'check']
+        && request.resource.data.target is number
+        && request.resource.data.target > 0
+        && request.resource.data.target <= 100000
+        && boundedString(request.resource.data.unit, 0, 16)
+        && request.resource.data.minutes_per_unit is number
+        && request.resource.data.minutes_per_unit > 0
+        && request.resource.data.minutes_per_unit <= 600
+        && request.resource.data.effort_minutes is number
+        && request.resource.data.effort_minutes >= 0
+        && request.resource.data.effort_minutes <= 600
+        && partsValid(request.resource.data.parts)
+        && scheduleValid(request.resource.data.schedule)
+        && request.resource.data.archived is bool;
+    }
+
+    match /activities/{activityId} {
+      allow read: if storedIsOwn();
+      allow create: if incomingIsOwn() && activityShapeValid() && createdNow();
+      allow update: if storedIsOwn()
+        && incomingIsOwn()
+        && ownerUnchanged()
+        && createdAtUnchanged()
+        && activityShapeValid();
+      allow delete: if storedIsOwn();
+    }
+
+    // ---- logs ------------------------------------------------------------
+
+    // A log is a raw fact: what was done, when, how much and how it was
+    // measured. It is never edited, only created or deleted (undo), so the
+    // history XP is computed from cannot be rewritten in place.
+    function logShapeValid() {
+      return request.resource.data.keys().hasAll(
+          ['owner_uid', 'activity_id', 'skill_id', 'day', 'kind', 'value',
+           'effort_minutes', 'source', 'part_id', 'created_at'])
+        && request.resource.data.keys().hasOnly(
+          ['owner_uid', 'activity_id', 'skill_id', 'day', 'kind', 'value',
+           'effort_minutes', 'source', 'part_id', 'created_at'])
+        && boundedString(request.resource.data.activity_id, 1, 80)
+        && boundedString(request.resource.data.skill_id, 1, 80)
+        && request.resource.data.day is string
+        && request.resource.data.day.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && request.resource.data.kind in ['time', 'count', 'check']
+        && request.resource.data.value is number
+        && request.resource.data.value > 0
+        && request.resource.data.value <= 100000
+        && request.resource.data.effort_minutes is number
+        && request.resource.data.effort_minutes >= 0
+        && request.resource.data.effort_minutes <= 1440
+        && request.resource.data.source in ['timer', 'manual']
+        // An empty string means "the activity has no parts".
+        && boundedString(request.resource.data.part_id, 0, 40);
+    }
+
+    match /logs/{logId} {
+      allow read: if storedIsOwn();
+      allow create: if incomingIsOwn() && logShapeValid() && createdNow();
+      allow update: if false;
+      allow delete: if storedIsOwn();
+    }
+
+    // ---- goals -----------------------------------------------------------
+
+    function dayString(value) {
+      return value is string
+        && value.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+    }
+
+    // Checked like a part above. Its id comes from the same generator.
+    function stepValid(step) {
+      return step.size() == 3
+        && step.id.matches('(?s).{1,40}')
+        && step.name.matches('(?s).{1,80}')
+        && step.done is bool;
+    }
+
+    function stepsValid(steps) {
+      let n = steps.size();
+      return steps is list
+        && n <= 20
+        && (n < 1 || stepValid(steps[0]) && (
+            n < 2 || stepValid(steps[1]) && (
+            n < 3 || stepValid(steps[2]) && (
+            n < 4 || stepValid(steps[3]) && (
+            n < 5 || stepValid(steps[4]) && (
+            n < 6 || stepValid(steps[5]) && (
+            n < 7 || stepValid(steps[6]) && (
+            n < 8 || stepValid(steps[7]) && (
+            n < 9 || stepValid(steps[8]) && (
+            n < 10 || stepValid(steps[9]) && (
+            n < 11 || stepValid(steps[10]) && (
+            n < 12 || stepValid(steps[11]) && (
+            n < 13 || stepValid(steps[12]) && (
+            n < 14 || stepValid(steps[13]) && (
+            n < 15 || stepValid(steps[14]) && (
+            n < 16 || stepValid(steps[15]) && (
+            n < 17 || stepValid(steps[16]) && (
+            n < 18 || stepValid(steps[17]) && (
+            n < 19 || stepValid(steps[18]) && (
+            n < 20 || stepValid(steps[19])
+        ))))))))))))))))))));
+    }
+
+    // Progress is not stored: it is the sum of logs or contributions, the
+    // level of a skill, or the steps ticked. Only a checklist has steps, and
+    // its other fields hold the fixed values the app writes, so the costly
+    // step checks never share a request with the checks of the other kinds.
+    function goalShapeValid() {
+      let goal = request.resource.data;
+      // Thirteen keys, all of them from this list: exactly these keys.
+      return goal.size() == 13
+        && goal.keys().hasOnly(
+          ['owner_uid', 'name', 'kind', 'target', 'activity_ids', 'skill_id',
+           'steps', 'currency', 'monthly_plan', 'start_day', 'deadline',
+           'archived', 'created_at'])
+        && boundedString(goal.name, 1, 80)
+        && (goal.kind == 'steps'
+          ? goal.target == 0
+            && goal.activity_ids == []
+            && goal.skill_id == ''
+            && goal.currency == ''
+            && goal.monthly_plan == 0
+            && stepsValid(goal.steps)
+          : goal.kind in ['count', 'skill', 'money']
+            && goal.target is number
+            && goal.target > 0
+            && goal.target <= 1000000000
+            && idsValid(goal.activity_ids)
+            && boundedString(goal.skill_id, 0, 80)
+            && goal.steps == []
+            && goal.currency in ['', 'UAH', 'USD', 'EUR', 'PLN', 'GBP']
+            && (goal.kind != 'money' || goal.currency != '')
+            && goal.monthly_plan is number
+            && goal.monthly_plan >= 0
+            && goal.monthly_plan <= 1000000000)
+        && dayString(goal.start_day)
+        // An empty string means "no deadline".
+        && (goal.deadline == '' || dayString(goal.deadline))
+        && goal.archived is bool;
+    }
+
+    match /goals/{goalId} {
+      allow read: if storedIsOwn();
+      allow create: if incomingIsOwn() && goalShapeValid() && createdNow();
+      allow update: if storedIsOwn()
+        && incomingIsOwn()
+        && ownerUnchanged()
+        && createdAtUnchanged()
+        && goalShapeValid();
+      allow delete: if storedIsOwn();
+    }
+
+    // Money put into a goal or taken out of it. Like a log it is a raw fact:
+    // created or deleted, never edited, so a total cannot be rewritten in
+    // place. A negative amount is a withdrawal; zero is nothing at all.
+    function goalEntryShapeValid() {
+      return request.resource.data.keys().hasAll(
+          ['owner_uid', 'goal_id', 'amount', 'day', 'created_at'])
+        && request.resource.data.keys().hasOnly(
+          ['owner_uid', 'goal_id', 'amount', 'day', 'created_at'])
+        && boundedString(request.resource.data.goal_id, 1, 80)
+        && request.resource.data.amount is number
+        && request.resource.data.amount != 0
+        && request.resource.data.amount >= -1000000000
+        && request.resource.data.amount <= 1000000000
+        && dayString(request.resource.data.day);
+    }
+
+    match /goal_entries/{entryId} {
+      allow read: if storedIsOwn();
+      allow create: if incomingIsOwn() && goalEntryShapeValid() && createdNow();
+      allow update: if false;
+      allow delete: if storedIsOwn();
+    }
+
+    // ---- everything else -------------------------------------------------
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

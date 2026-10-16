@@ -1,0 +1,35 @@
+# dependencies
+node_modules/
+
+# next.js
+.next/
+out/
+.swc/
+next-env.d.ts
+
+# typescript
+*.tsbuildinfo
+
+# env files: only the example is committed
+.env
+.env.*
+!.env.example
+
+# firebase
+.firebase/
+*-debug.log
+firebase-debug.*.log
+
+# logs
+npm-debug.log*
+
+# test output
+coverage/
+
+# OS, editors
+.DS_Store
+.idea/
+
+# Not published: agent notes, docs, specs and store texts stay on disk only
+AGENTS.md
+/docs/
