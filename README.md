@@ -1,5 +1,9 @@
 # Everhue
 
+[![CI](https://github.com/vdzeer/everhue/actions/workflows/ci.yml/badge.svg)](https://github.com/vdzeer/everhue/actions/workflows/ci.yml)
+[![everhue.web.app](https://img.shields.io/website?url=https%3A%2F%2Feverhue.web.app&label=everhue.web.app)](https://everhue.web.app)
+[![License: MIT](https://img.shields.io/github/license/vdzeer/everhue)](https://github.com/vdzeer/everhue/blob/main/LICENSE)
+
 Everhue is a web app that turns everyday activities into a small game. You
 plan the things you want to do (read, train, learn a language), log them with a
 timer or by hand, and each minute becomes XP for a skill and for your hero.
